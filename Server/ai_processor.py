@@ -38,13 +38,13 @@ def extract_tasks_and_summary(transcript: str) -> Dict[str, Any]:
         logger.warning("Empty transcript provided")
         return {"tasks": [], "summary": "No transcript provided."}
     
-    # Check if OpenAI API key is available
-    if not OPENAI_API_KEY:
+    # Check if OpenAI API key is available and properly configured
+    if not OPENAI_API_KEY or OPENAI_API_KEY == "sk-..." or OPENAI_API_KEY.startswith("sk-..."):
         logger.warning("OpenAI API key not configured, returning mock response")
         return {
             "tasks": [
-                {"task": "Review transcript setup", "assigned_to": "Admin", "deadline": "ASAP"},
-                {"task": "Configure OpenAI API key", "assigned_to": "Admin", "deadline": "ASAP"}
+                {"task": "Review transcript setup", "assigned_to": "Admin", "deadline": "ASAP", "priority": "medium"},
+                {"task": "Configure OpenAI API key", "assigned_to": "Admin", "deadline": "ASAP", "priority": "high"}
             ],
             "summary": "Mock response: Please configure OpenAI API key for real AI processing."
         }

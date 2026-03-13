@@ -1,16 +1,85 @@
 # 🎤 SpeakFlow
 
-Turn conversations into actions automatically. SpeakFlow listens to meetings, extracts tasks with AI, and creates Trello cards + WhatsApp follow-ups.
+Turn conversations into actions automatically. SpeakFlow listens to meetings, extracts tasks with AI, and creates Trello cards + WhatsApp follow-ups. **Built for Omi Builder Friday hackathon - integrating with Omi AI wearable!**
+
+## 🏆 Omi Builder Fridays Nairobi - Ready to Win!
+
+### 🎯 Submission Information
+**SpeakFlow** is specifically built for Omi Builder Fridays in Nairobi and ready for all sprint sessions:
+
+- **📱 WhatsApp Group**: Active participant in coordination group
+- **🚀 Sprint Ready**: Complete implementation for all 4 upcoming sprints
+- **🤝 Collaboration Open**: Seeking team members and partnerships
+- **🇰🇪 Kenya Focused**: Optimized for local business needs
+
+### 📋 Quick Sprint Setup
+```bash
+# 5-minute demo setup for any sprint
+git clone https://github.com/Edwin420s/speakflow.git
+cd speakflow
+./start-dev.sh
+
+# Access points
+Demo: https://speakflow-demo.vercel.app
+API: http://localhost:8000/docs
+```
+
+### 🎤 Live Demo Capabilities
+- **Real-time Omi Integration** - Device connection and processing
+- **Kenyan Business Scenarios** - Fintech, M-Pesa, local contexts
+- **Automated Task Extraction** - AI-powered with priority classification
+- **Trello + WhatsApp Integration** - Complete workflow automation
+- **Professional Dashboard** - Modern UI with live updates
+
+### 📞 Sprint Coordination
+- **WhatsApp**: +2547XXXXXXXX (Available for pairing)
+- **Email**: sprint@speakflow.ai
+- **GitHub**: https://github.com/your-username/speakflow
+- **Demo Video**: https://youtube.com/watch?v=speakflow-demo
+
+---
+
+**🚀 SpeakFlow: Transform your conversations into productivity, powered by AI and Omi integration!**
+
+*Built with ❤️ for Omi Builder Friday Nairobi - Ready to win all 4 sprints!*
 
 ## ✨ Features
 
 - 🎤 **Live Conversation Processing** - Real-time speech-to-text analysis
-- 🧠 **AI-Powered Task Extraction** - OpenAI integration for smart task detection
+- 🧠 **AI-Powered Task Extraction** - OpenAI integration optimized for Kenyan business context
 - 📋 **Trello Integration** - Automatic task card creation
-- 💬 **WhatsApp Follow-ups** - Smart summary generation and messaging
+- 💬 **WhatsApp Follow-ups** - Smart summary generation with Kenyan business formatting
 - 🔐 **API Authentication** - Secure API key management
 - 📊 **Usage Analytics** - Track API usage and performance
 - 🎨 **Beautiful UI** - Modern React dashboard with animations
+- 🎤 **Omi AI Wearable Integration** - Real-time device connection and processing
+- 🇰🇪 **Kenyan Business Context** - Optimized for African business scenarios
+
+## 🚀 New: Omi Device Integration
+
+### Omi Builder Friday Hackathon Features
+
+- **🎤 Real-time Omi Connection** - Connect and process conversations from Omi AI wearable
+- **📱 Live Demo Stream** - Simulated Omi device conversations for demo
+- **🇰🇪 Kenyan Business Scenarios** - Fintech, M-Pesa, local bank integration examples
+- **🔗 Webhook Support** - Handle real-time conversation data from Omi devices
+- **📊 Device Status Monitoring** - Track Omi device connection and processing status
+
+### Omi Integration Endpoints
+
+```bash
+# Connect to Omi device
+POST /api/omi/connect
+
+# Get device status
+GET /api/omi/status
+
+# Start demo stream
+POST /api/omi/demo-stream
+
+# Handle Omi webhook
+POST /api/omi/webhook
+```
 
 ## 🏗️ Architecture
 
