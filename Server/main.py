@@ -1,6 +1,7 @@
 import os
 import structlog
 import time
+import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
