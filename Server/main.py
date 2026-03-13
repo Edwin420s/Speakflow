@@ -18,6 +18,7 @@ from whatsapp_integration import send_whatsapp_message, format_whatsapp_summary
 from config import WHATSAPP_ENABLED, TRELLO_ENABLED
 from database import init_database, get_database
 from auth import get_current_api_key, log_api_usage, AuthManager
+from omi_integration import get_omi_integration, simulate_omi_webhook
 
 # Configure structured logging
 structlog.configure(
@@ -219,7 +220,7 @@ async def analyze_conversation(
         # 3. Optional: send WhatsApp summary
         if WHATSAPP_ENABLED and result["summary"]:
             try:
-                formatted_message = format_whatsapp_summary(result["summary"], len(result["tasks"]))
+                formatted_message = format_whatsapp_summary(result["summary"], len(result["tasks"]), result["tasks"])
                 whatsapp_result = send_whatsapp_message(formatted_message)
                 logger.info("WhatsApp message sent", result=whatsapp_result.status)
             except Exception as e:
@@ -401,6 +402,178 @@ async def send_whatsapp(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to send WhatsApp message"}
+        )
+
+@app.post("/api/omi/webhook")
+@limiter.limit("20/minute")
+async def omi_webhook(
+    request: Request,
+    webhook_data: dict,
+    api_key = Depends(get_current_api_key)
+):
+    """
+    Handle webhook from Omi AI wearable device.
+    Processes real-time conversation data from Omi device.
+    """
+    try:
+        # Validate webhook structure
+        if not webhook_data.get("data", {}).get("transcript"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Missing transcript in webhook data"}
+            )
+        
+        transcript = webhook_data["data"]["transcript"]
+        device_id = webhook_data.get("device_id", "unknown")
+        
+        logger.info(
+            "Processing Omi webhook",
+            device_id=device_id,
+            transcript_length=len(transcript),
+            api_key_name=api_key.name
+        )
+        
+        # Process the transcript using existing AI processor
+        result = extract_tasks_and_summary(transcript)
+        
+        # Create Trello cards if enabled
+        trello_results = []
+        if TRELLO_ENABLED and result["tasks"]:
+            try:
+                trello_results = create_trello_cards(result["tasks"])
+                logger.info("Trello cards created from Omi webhook", count=len(trello_results))
+            except Exception as e:
+                logger.error("Failed to create Trello cards from Omi webhook", error=str(e))
+        
+        # Send WhatsApp summary if enabled
+        if WHATSAPP_ENABLED and result["summary"]:
+            try:
+                formatted_message = format_whatsapp_summary(
+                    result["summary"], 
+                    len(result["tasks"]), 
+                    result["tasks"]
+                )
+                whatsapp_result = send_whatsapp_message(formatted_message)
+                logger.info("WhatsApp message sent from Omi webhook", result=whatsapp_result.status)
+            except Exception as e:
+                logger.error("Failed to send WhatsApp message from Omi webhook", error=str(e))
+        
+        return SpeakFlowResponse(
+            tasks=result["tasks"],
+            summary=result["summary"],
+            source="omi_webhook",
+            device_id=device_id
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error processing Omi webhook", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to process Omi webhook"}
+        )
+
+@app.get("/api/omi/status")
+@limiter.limit("10/minute")
+async def omi_device_status(
+    request: Request,
+    api_key = Depends(get_current_api_key)
+):
+    """Get Omi device connection status."""
+    try:
+        omi_integration = get_omi_integration()
+        
+        return {
+            "device_connected": omi_integration.is_connected,
+            "real_time_processing": omi_integration.processing_enabled,
+            "conversation_buffer_length": len(omi_integration.conversation_buffer),
+            "device_config": omi_integration.device_config,
+            "message": "Omi device integration ready for hackathon demo"
+        }
+        
+    except Exception as e:
+        logger.error("Error getting Omi device status", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to get Omi device status"}
+        )
+
+@app.post("/api/omi/connect")
+@limiter.limit("5/minute")
+async def connect_omi_device(
+    request: Request,
+    api_key = Depends(get_current_api_key)
+):
+    """Connect to Omi device (simulated for demo)."""
+    try:
+        omi_integration = get_omi_integration()
+        success = omi_integration.simulate_omi_connection()
+        
+        if success:
+            return {
+                "message": "Omi device connected successfully",
+                "device_id": "OMI-DEMO-001",
+                "status": "connected",
+                "capabilities": [
+                    "real_time_transcription",
+                    "ai_task_extraction", 
+                    "trello_integration",
+                    "whatsapp_followups"
+                ]
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": "Failed to connect to Omi device"}
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error connecting Omi device", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to connect to Omi device"}
+        )
+
+@app.post("/api/omi/demo-stream")
+@limiter.limit("3/minute")
+async def start_demo_stream(
+    request: Request,
+    api_key = Depends(get_current_api_key)
+):
+    """Start demo conversation stream from Omi device."""
+    try:
+        omi_integration = get_omi_integration()
+        
+        if not omi_integration.is_connected:
+            # Auto-connect for demo
+            omi_integration.simulate_omi_connection()
+        
+        # Start real-time processing
+        omi_integration.start_real_time_processing()
+        
+        # Simulate processing demo conversation
+        demo_tasks = []
+        for sentence in omi_integration.get_demo_conversation_stream():
+            result = omi_integration.process_conversation_chunk(b"", sentence)
+            if result.get("tasks"):
+                demo_tasks.extend(result["tasks"])
+        
+        return {
+            "message": "Demo stream completed",
+            "processed_sentences": len(list(omi_integration.get_demo_conversation_stream())),
+            "tasks_extracted": len(demo_tasks),
+            "demo_tasks": demo_tasks[:3],  # Return first 3 tasks as preview
+            "note": "Full processing results sent to Trello and WhatsApp"
+        }
+        
+    except Exception as e:
+        logger.error("Error starting demo stream", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to start demo stream"}
         )
 
 if __name__ == "__main__":

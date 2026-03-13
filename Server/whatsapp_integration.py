@@ -135,25 +135,49 @@ def test_twilio_connection() -> bool:
         logger.error("Unexpected error during Twilio connection test", error=str(e))
         return False
 
-def format_whatsapp_summary(summary: str, tasks_count: int) -> str:
+def format_whatsapp_summary(summary: str, tasks_count: int, tasks: list = None) -> str:
     """
-    Format summary and task count for WhatsApp message.
+    Format summary and task count for WhatsApp message with Kenyan business context.
     
     Args:
         summary: Meeting summary text
         tasks_count: Number of tasks extracted
+        tasks: List of task objects (optional)
         
     Returns:
         Formatted message string
     """
     emoji_tasks = "📋" if tasks_count > 0 else "✅"
     emoji_summary = "📝"
+    emoji_kenya = "🇰🇪"
     
-    message = f"{emoji_summary} *Meeting Summary*\n\n{summary}\n\n"
+    message = f"{emoji_kenya} *SpeakFlow AI - Meeting Summary*\n\n"
+    message += f"{emoji_summary} *Summary*\n{summary}\n\n"
     
-    if tasks_count > 0:
-        message += f"{emoji_tasks} *{tasks_count} task(s) extracted and added to Trello*"
+    if tasks_count > 0 and tasks:
+        message += f"{emoji_tasks} *{tasks_count} Action Items Extracted:*\n"
+        for i, task in enumerate(tasks[:5], 1):  # Show max 5 tasks
+            task_text = task.get('task', 'No description')
+            assigned = task.get('assigned_to', 'Unassigned')
+            deadline = task.get('deadline', 'No deadline')
+            priority = task.get('priority', 'medium')
+            
+            priority_emoji = {"high": "🔥", "medium": "⚡", "low": "📌"}.get(priority, "📌")
+            
+            message += f"\n{i}. {priority_emoji} {task_text}"
+            if assigned and assigned != 'null':
+                message += f"\n   👤 {assigned}"
+            if deadline and deadline != 'null':
+                message += f"\n   📅 {deadline}"
+        
+        if tasks_count > 5:
+            message += f"\n\n... and {tasks_count - 5} more tasks"
+        
+        message += f"\n\n💼 *All tasks added to your Trello board*"
     else:
         message += f"{emoji_tasks} *No action items identified*"
+    
+    message += f"\n\n🚀 *Powered by Omi AI Wearable*"
+    message += f"\n📱 Turning conversations into productivity!"
     
     return message
