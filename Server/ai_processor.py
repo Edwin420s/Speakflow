@@ -8,7 +8,14 @@ from config import OPENAI_API_KEY, OPENAI_MODEL
 
 logger = structlog.get_logger()
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Initialize OpenAI client lazily
+_client = None
+
+def get_openai_client():
+    global _client
+    if _client is None and OPENAI_API_KEY:
+        _client = OpenAI(api_key=OPENAI_API_KEY)
+    return _client
 
 def load_prompt_template() -> str:
     """Read the prompt template from file."""
@@ -31,9 +38,24 @@ def extract_tasks_and_summary(transcript: str) -> Dict[str, Any]:
         logger.warning("Empty transcript provided")
         return {"tasks": [], "summary": "No transcript provided."}
     
+    # Check if OpenAI API key is available
+    if not OPENAI_API_KEY:
+        logger.warning("OpenAI API key not configured, returning mock response")
+        return {
+            "tasks": [
+                {"task": "Review transcript setup", "assigned_to": "Admin", "deadline": "ASAP"},
+                {"task": "Configure OpenAI API key", "assigned_to": "Admin", "deadline": "ASAP"}
+            ],
+            "summary": "Mock response: Please configure OpenAI API key for real AI processing."
+        }
+    
     try:
         template = load_prompt_template()
         prompt = template.replace("{transcript}", transcript)
+
+        client = get_openai_client()
+        if not client:
+            raise Exception("Failed to initialize OpenAI client")
 
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
