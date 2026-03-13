@@ -1,0 +1,49 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependency directories
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Environment files (may contain sensitive keys)
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+*.tgz
+*.cache
+
+# Test coverage
+coverage
+*.lcov
+
+# Vite
+.vite/
+
+# Optional: if you use yarn or pnpm
+.pnpm-store/
+yarn-error.log
+
+# Temporary files
+tmp/
+temp/
