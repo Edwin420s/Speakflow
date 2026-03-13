@@ -345,6 +345,63 @@ async def revoke_api_key(
 # Initialize auth manager
 auth_manager = AuthManager()
 
+@app.post("/api/trello/create")
+@limiter.limit("10/minute")
+async def create_trello_card(
+    request: Request,
+    task: dict,
+    api_key = Depends(get_current_api_key)
+):
+    """Create a Trello card for a single task."""
+    try:
+        if not TRELLO_ENABLED:
+            return {"error": "Trello integration is disabled"}
+        
+        results = create_trello_cards([task])
+        return results[0] if results else {"error": "Failed to create card"}
+        
+    except Exception as e:
+        logger.error("Error creating Trello card", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to create Trello card"}
+        )
+
+@app.post("/api/whatsapp/send")
+@limiter.limit("10/minute")
+async def send_whatsapp(
+    request: Request,
+    message_data: dict,
+    api_key = Depends(get_current_api_key)
+):
+    """Send WhatsApp message."""
+    try:
+        if not WHATSAPP_ENABLED:
+            return {"error": "WhatsApp integration is disabled"}
+        
+        message = message_data.get("message", "")
+        if not message:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Message cannot be empty"}
+            )
+        
+        result = send_whatsapp_message(message)
+        return {
+            "message_sid": result.message_sid,
+            "status": result.status,
+            "success": not result.error
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error sending WhatsApp message", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to send WhatsApp message"}
+        )
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     host = os.getenv("HOST", "0.0.0.0")

@@ -1,29 +1,61 @@
 import { useState, useEffect } from 'react'
 import { motion } from 'framer-motion'
+import { sendWhatsAppMessage } from '../services/whatsappService'
 
 export default function WhatsAppPanel() {
+  const [summary, setSummary] = useState('')
   const [showMessage, setShowMessage] = useState(false)
+  const [isSending, setIsSending] = useState(false)
 
   useEffect(() => {
-    const timer = setTimeout(() => setShowMessage(true), 7000)
-    return () => clearTimeout(timer)
+    // Listen for conversation analysis results
+    const handleAnalysis = (event) => {
+      const result = event.detail
+      if (result.summary) {
+        setSummary(result.summary)
+        setShowMessage(true)
+      }
+    }
+
+    window.addEventListener('conversation-analyzed', handleAnalysis)
+    return () => window.removeEventListener('conversation-analyzed', handleAnalysis)
   }, [])
 
-  const message = `Hi team 👋
+  const formatWhatsAppMessage = (summary, tasksCount) => {
+    return `Hi team 👋
 
 Here are the action items from today's meeting:
 
-• Edwin – Finish backend tonight
-• Sarah – Design UI by Friday
-• John – Send proposal tomorrow
+${summary}
+
+📋 ${tasksCount} task(s) extracted and added to Trello
 
 Let's keep the momentum 🚀`
+  }
+
+  const handleSendToWhatsApp = async () => {
+    if (!summary) return
+    
+    setIsSending(true)
+    try {
+      const result = await sendWhatsAppMessage(summary)
+      console.log('WhatsApp result:', result)
+      alert('WhatsApp message sent successfully!')
+    } catch (error) {
+      console.error('Failed to send WhatsApp message:', error)
+      alert('Failed to send WhatsApp message')
+    } finally {
+      setIsSending(false)
+    }
+  }
+
+  const message = summary ? formatWhatsAppMessage(summary, 3) : ''
 
   return (
     <div className="bg-[#111827] p-6 rounded-lg border border-gray-800">
       <h2 className="text-xl font-semibold mb-4">💬 WhatsApp Summary</h2>
 
-      {showMessage ? (
+      {showMessage && summary ? (
         <motion.pre
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -40,14 +72,15 @@ Let's keep the momentum 🚀`
       )}
 
       <button
+        onClick={handleSendToWhatsApp}
+        disabled={!showMessage || !summary || isSending}
         className={`w-full mt-6 py-2 rounded transition ${
-          showMessage
+          showMessage && summary && !isSending
             ? 'bg-green-600 hover:bg-green-700'
             : 'bg-gray-700 cursor-not-allowed'
         }`}
-        disabled={!showMessage}
       >
-        Send to WhatsApp
+        {isSending ? 'Sending...' : 'Send to WhatsApp'}
       </button>
     </div>
   )
