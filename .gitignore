@@ -149,61 +149,63 @@ Thumbs.db
 # Project specific
 # Ignore local environment variables (but keep template)
 .env
-!/.env.template
+!.env.template
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+speakflow.db
 
 # Logs
+logs/
 *.log
 
 # Temporary files
 tmp/
 temp/
 
-# Logs
-logs
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-lerna-debug.log*
+# SSL certificates (for development)
+ssl/
+*.pem
+*.crt
+*.key
 
-# Dependency directories
+# Data directory
+data/
+
+# Docker volumes
+postgres_data/
+redis_data/
+
+# Node modules (if any frontend components)
 node_modules/
-dist/
-dist-ssr/
-*.local
-
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
-
-# Environment files (may contain sensitive keys)
-.env
-.env.local
-.env.*.local
 
 # Build outputs
 *.tgz
 *.cache
 
 # Test coverage
-coverage
+coverage/
 *.lcov
 
 # Vite
 .vite/
 
-# Optional: if you use yarn or pnpm
+# Optional npm files
 .pnpm-store/
 yarn-error.log
 
-# Temporary files
-tmp/
-temp/
+# Backup files
+*.bak
+*.backup
+
+# Runtime files
+*.pid
+
+# SpeakFlow specific
+# Keep template but ignore actual env files
+.env.local
+.env.development
+.env.production
+!.env.template
