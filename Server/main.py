@@ -4,6 +4,7 @@ import time
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request, status, Depends
+from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -11,12 +12,16 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from pydantic import ValidationError
 
-from models import TranscriptRequest, SpeakFlowResponse, ErrorResponse
+from models import (
+    TranscriptRequest, SpeakFlowResponse, ErrorResponse, 
+    Activity, ActivityFeed, Timeline, TimelineEvent as TimelineEventModel, 
+    ActivityType, Priority, TaskStatus
+)
 from ai_processor import extract_tasks_and_summary
 from trello_integration import create_trello_cards
 from whatsapp_integration import send_whatsapp_message, format_whatsapp_summary
 from config import WHATSAPP_ENABLED, TRELLO_ENABLED
-from database import init_database, get_database
+from database import init_database, get_database, Activity as DBActivity, TimelineEvent as DBTimelineEvent
 from auth import get_current_api_key, log_api_usage, AuthManager
 from omi_integration import get_omi_integration, simulate_omi_webhook
 
@@ -205,24 +210,73 @@ async def analyze_conversation(
             api_key_name=api_key.name
         )
         
-        # 1. AI processing
-        result = extract_tasks_and_summary(transcript_request.text)
+        # 1. Log AI processing started activity
+        start_activity = log_activity(
+            type=ActivityType.AI_PROCESSING_STARTED,
+            title="AI Processing Started",
+            description=f"Processing transcript of {len(transcript_request.text)} characters",
+            metadata={"text_length": len(transcript_request.text), "client_ip": get_remote_address(request)}
+        )
         
-        # 2. Optional: create Trello cards
+        # 2. AI processing
+        result = extract_tasks_and_summary(transcript_request.text)
+        processing_time = int((time.time() - start_time) * 1000)
+        
+        # 3. Log transcript processed activity
+        transcript_activity = log_activity(
+            type=ActivityType.TRANSCRIPT_PROCESSED,
+            title="Transcript Processed",
+            description=f"Successfully processed transcript and extracted {len(result['tasks'])} tasks",
+            metadata={
+                "tasks_count": len(result['tasks']),
+                "summary_length": len(result['summary']),
+                "processing_time_ms": processing_time
+            }
+        )
+        
+        # 4. Log AI processing completed activity
+        completion_activity = log_activity(
+            type=ActivityType.AI_PROCESSING_COMPLETED,
+            title="AI Processing Completed",
+            description="AI processing completed successfully",
+            metadata={
+                "processing_time_ms": processing_time,
+                "tasks_extracted": len(result['tasks']),
+                "confidence_score": result.get("confidence_score", 0.0)
+            }
+        )
+        
+        # 5. Optional: create Trello cards
         trello_results = []
         if TRELLO_ENABLED and result["tasks"]:
             try:
                 trello_results = create_trello_cards(result["tasks"])
                 logger.info("Trello cards created", count=len(trello_results))
+                
+                # Log Trello activity
+                log_activity(
+                    type=ActivityType.TRELLO_CARD_CREATED,
+                    title="Trello Cards Created",
+                    description=f"Created {len(trello_results)} Trello cards",
+                    metadata={"card_count": len(trello_results), "cards": trello_results}
+                )
             except Exception as e:
                 logger.error("Failed to create Trello cards", error=str(e))
         
-        # 3. Optional: send WhatsApp summary
+        # 6. Optional: send WhatsApp summary
         if WHATSAPP_ENABLED and result["summary"]:
             try:
                 formatted_message = format_whatsapp_summary(result["summary"], len(result["tasks"]), result["tasks"])
                 whatsapp_result = send_whatsapp_message(formatted_message)
                 logger.info("WhatsApp message sent", result=whatsapp_result.status)
+                
+                # Log WhatsApp activity
+                log_activity(
+                    type=ActivityType.WHATSAPP_SENT,
+                    title="WhatsApp Summary Sent",
+                    description="Meeting summary sent via WhatsApp",
+                    metadata={"message_status": whatsapp_result.status, "message_length": len(formatted_message)}
+                )
             except Exception as e:
                 logger.error("Failed to send WhatsApp message", error=str(e))
         
@@ -234,7 +288,10 @@ async def analyze_conversation(
         
         return SpeakFlowResponse(
             tasks=result["tasks"],
-            summary=result["summary"]
+            summary=result["summary"],
+            processing_time_ms=processing_time,
+            confidence_score=result.get("confidence_score"),
+            activity_id=completion_activity.id if completion_activity else None
         )
         
     except HTTPException:
@@ -346,6 +403,68 @@ async def revoke_api_key(
 
 # Initialize auth manager
 auth_manager = AuthManager()
+
+def log_activity(type: ActivityType, title: str, description: str, metadata: dict = None, 
+                user_id: str = None, session_id: str = None, transcript_id: int = None, 
+                task_id: int = None) -> Activity:
+    """Log an activity to the database."""
+    try:
+        db = get_database()
+        session = db.get_session()
+        
+        activity = Activity(
+            type=type.value,
+            title=title,
+            description=description,
+            activity_metadata=metadata or {},
+            user_id=user_id,
+            session_id=session_id,
+            transcript_id=transcript_id,
+            task_id=task_id
+        )
+        
+        session.add(activity)
+        session.commit()
+        session.refresh(activity)
+        
+        logger.info("Activity logged", activity_type=type.value, activity_id=activity.id)
+        return activity
+        
+    except Exception as e:
+        logger.error("Failed to log activity", error=str(e), activity_type=type.value)
+        return None
+    finally:
+        if 'session' in locals():
+            session.close()
+
+def create_timeline_event(title: str, description: str, event_type: ActivityType, 
+                         related_task_id: int = None, metadata: dict = None) -> TimelineEvent:
+    """Create a timeline event."""
+    try:
+        db = get_database()
+        session = db.get_session()
+        
+        event = TimelineEvent(
+            title=title,
+            description=description,
+            event_type=event_type.value,
+            related_task_id=related_task_id,
+            event_metadata=metadata or {}
+        )
+        
+        session.add(event)
+        session.commit()
+        session.refresh(event)
+        
+        logger.info("Timeline event created", event_type=event_type.value, event_id=event.id)
+        return event
+        
+    except Exception as e:
+        logger.error("Failed to create timeline event", error=str(e), event_type=event_type.value)
+        return None
+    finally:
+        if 'session' in locals():
+            session.close()
 
 @app.post("/api/trello/create")
 @limiter.limit("10/minute")
@@ -499,7 +618,273 @@ async def omi_device_status(
             detail={"error": "Failed to get Omi device status"}
         )
 
-@app.post("/api/omi/connect")
+# Activity Feed endpoints
+@app.get("/api/activities", response_model=ActivityFeed)
+@limiter.limit("10/minute")
+async def get_activity_feed(
+    request: Request,
+    page: int = 1,
+    page_size: int = 20,
+    activity_type: Optional[str] = None,
+    user_id: Optional[str] = None,
+    api_key = Depends(get_current_api_key)
+):
+    """Get paginated activity feed."""
+    try:
+        db = get_database()
+        session = db.get_session()
+        
+        # Build query
+        query = session.query(DBActivity)
+        
+        # Apply filters
+        if activity_type:
+            query = query.filter(DBActivity.type == activity_type)
+        if user_id:
+            query = query.filter(DBActivity.user_id == user_id)
+        
+        # Count total activities
+        total_count = query.count()
+        
+        # Apply pagination
+        offset = (page - 1) * page_size
+        activities = query.order_by(DBActivity.timestamp.desc()).offset(offset).limit(page_size).all()
+        
+        # Convert to response models
+        activity_models = []
+        for activity in activities:
+            activity_models.append(Activity(
+                id=activity.id,
+                type=ActivityType(activity.type),
+                title=activity.title,
+                description=activity.description,
+                metadata=activity.activity_metadata or {},
+                timestamp=activity.timestamp,
+                user_id=activity.user_id,
+                session_id=activity.session_id
+            ))
+        
+        has_more = (offset + len(activities)) < total_count
+        
+        return ActivityFeed(
+            activities=activity_models,
+            total_count=total_count,
+            page=page,
+            page_size=page_size,
+            has_more=has_more
+        )
+        
+    except Exception as e:
+        logger.error("Error fetching activity feed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to fetch activity feed"}
+        )
+    finally:
+        if 'session' in locals():
+            session.close()
+
+@app.get("/api/timeline", response_model=Timeline)
+@limiter.limit("10/minute")
+async def get_timeline(
+    request: Request,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    event_type: Optional[str] = None,
+    api_key = Depends(get_current_api_key)
+):
+    """Get timeline with progress tracking."""
+    try:
+        db = get_database()
+        session = db.get_session()
+        
+        # Build query for timeline events
+        query = session.query(TimelineEvent)
+        
+        # Apply filters
+        if event_type:
+            query = query.filter(TimelineEvent.event_type == event_type)
+        if start_date:
+            query = query.filter(TimelineEvent.timestamp >= datetime.fromisoformat(start_date))
+        if end_date:
+            query = query.filter(TimelineEvent.timestamp <= datetime.fromisoformat(end_date))
+        
+        # Get all events
+        events = query.order_by(TimelineEvent.timestamp.asc()).all()
+        
+        # Calculate completion statistics
+        total_events = len(events)
+        completed_events = sum(1 for event in events if event.completed)
+        completion_percentage = (completed_events / total_events * 100) if total_events > 0 else 0.0
+        
+        # Get task statistics
+        active_tasks = session.query(Task).filter(Task.status.in_(['pending', 'in_progress'])).count()
+        completed_tasks = session.query(Task).filter(Task.status == 'completed').count()
+        
+        # Convert to response models
+        timeline_events = []
+        for event in events:
+            timeline_events.append(TimelineEvent(
+                id=event.id,
+                title=event.title,
+                description=event.description,
+                event_type=ActivityType(event.event_type),
+                timestamp=event.timestamp,
+                completed=event.completed,
+                progress_percentage=event.progress_percentage,
+                related_task_id=event.related_task_id,
+                metadata=event.event_metadata or {}
+            ))
+        
+        # Get timeline date range
+        start_timeline = events[0].timestamp if events else None
+        end_timeline = events[-1].timestamp if events else None
+        
+        return Timeline(
+            events=timeline_events,
+            total_events=total_events,
+            completion_percentage=completion_percentage,
+            start_date=start_timeline,
+            end_date=end_timeline,
+            active_tasks=active_tasks,
+            completed_tasks=completed_tasks
+        )
+        
+    except Exception as e:
+        logger.error("Error fetching timeline", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to fetch timeline"}
+        )
+    finally:
+        if 'session' in locals():
+            session.close()
+
+@app.post("/api/timeline/events", response_model=TimelineEventModel)
+@limiter.limit("5/minute")
+async def create_timeline_event_endpoint(
+    request: Request,
+    event_data: dict,
+    api_key = Depends(get_current_api_key)
+):
+    """Create a new timeline event."""
+    try:
+        # Validate required fields
+        required_fields = ['title', 'description', 'event_type']
+        for field in required_fields:
+            if field not in event_data:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error": f"Missing required field: {field}"}
+                )
+        
+        # Validate event type
+        try:
+            event_type = ActivityType(event_data['event_type'])
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "Invalid event type"}
+            )
+        
+        # Create timeline event
+        event = create_timeline_event(
+            title=event_data['title'],
+            description=event_data['description'],
+            event_type=event_type,
+            related_task_id=event_data.get('related_task_id'),
+            metadata=event_data.get('metadata', {})
+        )
+        
+        if not event:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": "Failed to create timeline event"}
+            )
+        
+        return TimelineEvent(
+            id=event.id,
+            title=event.title,
+            description=event.description,
+            event_type=ActivityType(event.event_type),
+            timestamp=event.timestamp,
+            completed=event.completed,
+            progress_percentage=event.progress_percentage,
+            related_task_id=event.related_task_id,
+            metadata=event.metadata or {}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error creating timeline event", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to create timeline event"}
+        )
+
+@app.put("/api/timeline/events/{event_id}", response_model=TimelineEventModel)
+@limiter.limit("5/minute")
+async def update_timeline_event(
+    request: Request,
+    event_id: int,
+    event_data: dict,
+    api_key = Depends(get_current_api_key)
+):
+    """Update a timeline event."""
+    try:
+        db = get_database()
+        session = db.get_session()
+        
+        # Get existing event
+        event = session.query(DBTimelineEvent).filter(DBTimelineEvent.id == event_id).first()
+        if not event:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Timeline event not found"}
+            )
+        
+        # Update fields
+        if 'title' in event_data:
+            event.title = event_data['title']
+        if 'description' in event_data:
+            event.description = event_data['description']
+        if 'completed' in event_data:
+            event.completed = event_data['completed']
+        if 'progress_percentage' in event_data:
+            event.progress_percentage = event_data['progress_percentage']
+        if 'metadata' in event_data:
+            event.metadata = event_data['metadata']
+        
+        event.updated_at = datetime.utcnow()
+        session.commit()
+        session.refresh(event)
+        
+        return TimelineEvent(
+            id=event.id,
+            title=event.title,
+            description=event.description,
+            event_type=ActivityType(event.event_type),
+            timestamp=event.timestamp,
+            completed=event.completed,
+            progress_percentage=event.progress_percentage,
+            related_task_id=event.related_task_id,
+            metadata=event.metadata or {}
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error updating timeline event", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to update timeline event"}
+        )
+    finally:
+        if 'session' in locals():
+            session.close()
+
+@app.post("/api/omi/connect", response_model=TimelineEvent)
 @limiter.limit("5/minute")
 async def connect_omi_device(
     request: Request,

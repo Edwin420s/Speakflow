@@ -1,6 +1,6 @@
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, JSON
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, JSON, Float, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import sessionmaker, Session, relationship
 from datetime import datetime
 import os
 from typing import Optional
@@ -34,14 +34,65 @@ class Task(Base):
     task = Column(String(500), nullable=False)
     assigned_to = Column(String(100), nullable=True)
     deadline = Column(String(50), nullable=True)
+    priority = Column(String(20), nullable=False, default="medium")  # low, medium, high, urgent
+    status = Column(String(20), nullable=False, default="pending")  # pending, in_progress, completed, cancelled
+    tags = Column(JSON, nullable=True)  # List of tags
+    estimated_time = Column(String(50), nullable=True)
+    context = Column(Text, nullable=True)
     completed = Column(Boolean, default=False)
     trello_card_id = Column(String(50), nullable=True)
     trello_card_url = Column(String(255), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
+    # Relationships
+    activities = relationship("Activity", back_populates="task")
+    
     def __repr__(self):
         return f"<Task(id={self.id}, task={self.task[:50]}..., assigned_to={self.assigned_to})>"
+
+class Activity(Base):
+    """Database model for storing system activities."""
+    __tablename__ = "activities"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    type = Column(String(50), nullable=False, index=True)  # ActivityType enum values
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=False)
+    activity_metadata = Column(JSON, nullable=True)  # Renamed to avoid conflict
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    user_id = Column(String(100), nullable=True, index=True)
+    session_id = Column(String(100), nullable=True, index=True)
+    transcript_id = Column(Integer, nullable=True, index=True)
+    task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    
+    # Relationships
+    task = relationship("Task", back_populates="activities")
+    
+    def __repr__(self):
+        return f"<Activity(id={self.id}, type={self.type}, timestamp={self.timestamp})>"
+
+class TimelineEvent(Base):
+    """Database model for timeline events."""
+    __tablename__ = "timeline_events"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False)
+    description = Column(Text, nullable=False)
+    event_type = Column(String(50), nullable=False, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    completed = Column(Boolean, default=False)
+    progress_percentage = Column(Float, default=0.0)
+    related_task_id = Column(Integer, ForeignKey("tasks.id"), nullable=True, index=True)
+    event_metadata = Column(JSON, nullable=True)  # Renamed to avoid conflict
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    task = relationship("Task")
+    
+    def __repr__(self):
+        return f"<TimelineEvent(id={self.id}, title={self.title[:50]}..., completed={self.completed})>"
 
 class ApiKey(Base):
     """Database model for API key management."""
@@ -75,7 +126,11 @@ class UsageLog(Base):
     status_code = Column(Integer, nullable=False)
     processing_time_ms = Column(Integer, nullable=True)
     error_message = Column(Text, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    activity_id = Column(Integer, ForeignKey("activities.id"), nullable=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    
+    # Relationships
+    activity = relationship("Activity")
     
     def __repr__(self):
         return f"<UsageLog(id={self.id}, endpoint={self.endpoint}, status={self.status_code})>"
