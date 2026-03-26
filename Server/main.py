@@ -1,9 +1,10 @@
 import os
 import structlog
 import time
+import asyncio
 import uvicorn
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request, status, Depends
+from fastapi import FastAPI, HTTPException, Request, status, Depends, Query, WebSocket
 from typing import Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -23,7 +24,10 @@ from whatsapp_integration import send_whatsapp_message, format_whatsapp_summary
 from config import WHATSAPP_ENABLED, TRELLO_ENABLED
 from database import init_database, get_database, Activity as DBActivity, TimelineEvent as DBTimelineEvent
 from auth import get_current_api_key, log_api_usage, AuthManager
-from omi_integration import get_omi_integration, simulate_omi_webhook
+from websocket_handlers import get_websocket_manager, get_stt_service_for_language
+from device_integration import get_device_protocol, identify_device_type, validate_device_compatibility
+from user_auth import get_auth_manager, AuthProvider, create_demo_users
+from conversation_storage import get_conversation_storage, extract_structured_data_from_ai_result
 
 # Configure structured logging
 structlog.configure(
@@ -884,7 +888,7 @@ async def update_timeline_event(
         if 'session' in locals():
             session.close()
 
-@app.post("/api/omi/connect", response_model=TimelineEvent)
+@app.post("/api/omi/connect", response_model=TimelineEventModel)
 @limiter.limit("5/minute")
 async def connect_omi_device(
     request: Request,
@@ -960,6 +964,694 @@ async def start_demo_stream(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "Failed to start demo stream"}
         )
+
+# Authentication Endpoints (following Omi Firebase Auth patterns)
+@app.post("/auth/firebase/login")
+@limiter.limit("5/minute")
+async def firebase_login(request: Request, auth_data: dict):
+    """Authenticate with Firebase ID token."""
+    try:
+        id_token = auth_data.get("id_token")
+        if not id_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "id_token is required"}
+            )
+        
+        auth_manager = get_auth_manager()
+        uid = auth_manager.verify_firebase_token(id_token)
+        
+        if not uid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error": "Invalid Firebase token"}
+            )
+        
+        # Generate auth tokens
+        tokens = auth_manager.generate_auth_tokens(uid)
+        if not tokens:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": "Failed to generate tokens"}
+            )
+        
+        # Get user profile
+        profile = auth_manager.get_user_profile(uid)
+        
+        return {
+            "user": {
+                "uid": profile.uid,
+                "email": profile.email,
+                "display_name": profile.display_name,
+                "photo_url": profile.photo_url,
+                "auth_provider": profile.auth_provider.value,
+                "created_at": profile.created_at.isoformat(),
+                "last_login": profile.last_login.isoformat() if profile.last_login else None,
+                "device_preferences": profile.device_preferences,
+                "notification_settings": profile.notification_settings,
+                "subscription_tier": profile.subscription_tier
+            },
+            "tokens": {
+                "access_token": tokens.access_token,
+                "refresh_token": tokens.refresh_token,
+                "token_type": tokens.token_type,
+                "expires_in": tokens.expires_in
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Firebase login failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Authentication failed"}
+        )
+
+@app.post("/auth/email/login")
+@limiter.limit("5/minute")
+async def email_login(request: Request, auth_data: dict):
+    """Login with email and password."""
+    try:
+        email = auth_data.get("email")
+        password = auth_data.get("password")
+        
+        if not email or not password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "email and password are required"}
+            )
+        
+        auth_manager = get_auth_manager()
+        uid = auth_manager.authenticate_with_email_password(email, password)
+        
+        if not uid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error": "Invalid email or password"}
+            )
+        
+        # Generate auth tokens
+        tokens = auth_manager.generate_auth_tokens(uid)
+        if not tokens:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": "Failed to generate tokens"}
+            )
+        
+        # Get user profile
+        profile = auth_manager.get_user_profile(uid)
+        
+        return {
+            "user": {
+                "uid": profile.uid,
+                "email": profile.email,
+                "display_name": profile.display_name,
+                "photo_url": profile.photo_url,
+                "auth_provider": profile.auth_provider.value,
+                "created_at": profile.created_at.isoformat(),
+                "last_login": profile.last_login.isoformat() if profile.last_login else None,
+                "device_preferences": profile.device_preferences,
+                "notification_settings": profile.notification_settings,
+                "subscription_tier": profile.subscription_tier
+            },
+            "tokens": {
+                "access_token": tokens.access_token,
+                "refresh_token": tokens.refresh_token,
+                "token_type": tokens.token_type,
+                "expires_in": tokens.expires_in
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Email login failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Authentication failed"}
+        )
+
+@app.post("/auth/refresh")
+@limiter.limit("10/minute")
+async def refresh_token(request: Request, auth_data: dict):
+    """Refresh access token."""
+    try:
+        refresh_token = auth_data.get("refresh_token")
+        if not refresh_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "refresh_token is required"}
+            )
+        
+        auth_manager = get_auth_manager()
+        access_token = auth_manager.refresh_access_token(refresh_token)
+        
+        if not access_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error": "Invalid or expired refresh token"}
+            )
+        
+        return {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": 3600
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Token refresh failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Token refresh failed"}
+        )
+
+# Device Management Endpoints (following Omi documentation)
+@app.get("/v1/devices/scan")
+@limiter.limit("10/minute")
+async def scan_devices(
+    request: Request,
+    device_type: Optional[str] = None,
+    api_key = Depends(get_current_api_key)
+):
+    """Scan for available Omi devices following BLE protocol."""
+    try:
+        device_protocol = get_device_protocol()
+        
+        # Convert string to DeviceType enum if provided
+        target_type = None
+        if device_type:
+            try:
+                target_type = DeviceType(device_type)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error": f"Invalid device type: {device_type}"}
+                )
+        
+        # Scan for devices
+        devices = await device_protocol.scan_for_devices(target_type)
+        
+        # Convert to response format
+        device_list = []
+        for device in devices:
+            device_list.append({
+                "device_id": device.device_id,
+                "name": device.name,
+                "type": device.device_type.value,
+                "manufacturer": device.manufacturer,
+                "firmware_version": device.firmware_version,
+                "audio_codec": device.audio_codec.value,
+                "sample_rate": device.sample_rate,
+                "battery_level": device.battery_level,
+                "connected": device.device_id in device_protocol.connected_devices
+            })
+        
+        return {
+            "devices": device_list,
+            "count": len(device_list),
+            "scan_time": time.time()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error scanning devices", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to scan devices"}
+        )
+
+@app.post("/v1/devices/{device_id}/connect")
+@limiter.limit("5/minute")
+async def connect_device(
+    request: Request,
+    device_id: str,
+    api_key = Depends(get_current_api_key)
+):
+    """Connect to Omi device via BLE."""
+    try:
+        device_protocol = get_device_protocol()
+        
+        # Validate device exists
+        available_devices = await device_protocol.scan_for_devices()
+        device_exists = any(d.device_id == device_id for d in available_devices)
+        
+        if not device_exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Device not found"}
+            )
+        
+        # Connect to device
+        success = await device_protocol.connect_device(device_id)
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={"error": "Failed to connect to device"}
+            )
+        
+        # Get device info
+        device_info = await device_protocol.get_device_info(device_id)
+        
+        # Log connection activity
+        await log_activity(
+            type=ActivityType.OMI_DEVICE_CONNECTED,
+            title=f"Omi Device Connected",
+            description=f"Connected to {device_info.name}",
+            metadata={"device_id": device_id, "device_type": device_info.device_type.value}
+        )
+        
+        return {
+            "device_id": device_id,
+            "name": device_info.name,
+            "type": device_info.device_type.value,
+            "connected": True,
+            "battery_level": device_info.battery_level,
+            "audio_codec": device_info.audio_codec.value,
+            "sample_rate": device_info.sample_rate
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error connecting device", device_id=device_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to connect to device"}
+        )
+
+@app.post("/v1/devices/{device_id}/disconnect")
+@limiter.limit("5/minute")
+async def disconnect_device(
+    request: Request,
+    device_id: str,
+    api_key = Depends(get_current_api_key)
+):
+    """Disconnect from Omi device."""
+    try:
+        device_protocol = get_device_protocol()
+        
+        # Check if device is connected
+        if device_id not in device_protocol.connected_devices:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Device not connected"}
+            )
+        
+        # Disconnect device
+        await device_protocol.disconnect_device(device_id)
+        
+        return {
+            "device_id": device_id,
+            "connected": False,
+            "message": "Device disconnected successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error disconnecting device", device_id=device_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to disconnect device"}
+        )
+
+@app.get("/v1/devices/{device_id}/status")
+@limiter.limit("10/minute")
+async def get_device_status(
+    request: Request,
+    device_id: str,
+    api_key = Depends(get_current_api_key)
+):
+    """Get device status and information."""
+    try:
+        device_protocol = get_device_protocol()
+        
+        # Get device info
+        device_info = await device_protocol.get_device_info(device_id)
+        if not device_info:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Device not found"}
+            )
+        
+        # Get battery level
+        battery_level = await device_protocol.get_battery_level(device_id)
+        
+        return {
+            "device_id": device_id,
+            "name": device_info.name,
+            "type": device_info.device_type.value,
+            "manufacturer": device_info.manufacturer,
+            "firmware_version": device_info.firmware_version,
+            "connected": device_id in device_protocol.connected_devices,
+            "battery_level": battery_level,
+            "audio_codec": device_info.audio_codec.value,
+            "sample_rate": device_info.sample_rate,
+            "supported_services": [
+                {
+                    "uuid": service.uuid,
+                    "name": service.name,
+                    "characteristics": service.characteristics
+                }
+                for service in device_protocol.get_supported_services()
+            ]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error getting device status", device_id=device_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to get device status"}
+        )
+
+@app.get("/v1/conversations")
+@limiter.limit("10/minute")
+async def get_conversations(
+    request: Request,
+    user_id: str = Query(..., description="User ID"),
+    limit: int = Query(default=50, ge=1, le=100),
+    include_discarded: bool = Query(default=False),
+    api_key = Depends(get_current_api_key)
+):
+    """Get user conversations following Omi documentation."""
+    try:
+        conversation_storage = get_conversation_storage()
+        
+        # Get conversations
+        conversations = conversation_storage.get_user_conversations(
+            user_id=user_id,
+            limit=limit,
+            include_discarded=include_discarded
+        )
+        
+        # Convert to response format
+        conversation_list = []
+        for conv in conversations:
+            conversation_list.append({
+                "id": conv.id,
+                "created_at": conv.created_at.isoformat(),
+                "started_at": conv.started_at.isoformat() if conv.started_at else None,
+                "finished_at": conv.finished_at.isoformat() if conv.finished_at else None,
+                "source": conv.source.value,
+                "language": conv.language,
+                "status": conv.status.value,
+                "title": conv.structured.title,
+                "overview": conv.structured.overview,
+                "category": conv.structured.category,
+                "duration": conv.duration,
+                "transcript_segments_count": len(conv.transcript_segments),
+                "action_items_count": len(conv.structured.action_items),
+                "memories_count": len(conv.structured.memories),
+                "device_id": conv.device_id,
+                "visibility": conv.visibility
+            })
+        
+        return {
+            "conversations": conversation_list,
+            "count": len(conversation_list),
+            "user_id": user_id
+        }
+        
+    except Exception as e:
+        logger.error("Error getting conversations", user_id=user_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to get conversations"}
+        )
+
+@app.get("/v1/conversations/{conversation_id}")
+@limiter.limit("10/minute")
+async def get_conversation(
+    request: Request,
+    conversation_id: str,
+    api_key = Depends(get_current_api_key)
+):
+    """Get specific conversation details."""
+    try:
+        conversation_storage = get_conversation_storage()
+        conversation = conversation_storage.get_conversation(conversation_id)
+        
+        if not conversation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"error": "Conversation not found"}
+            )
+        
+        # Convert to response format
+        return {
+            "id": conversation.id,
+            "created_at": conversation.created_at.isoformat(),
+            "started_at": conversation.started_at.isoformat() if conversation.started_at else None,
+            "finished_at": conversation.finished_at.isoformat() if conversation.finished_at else None,
+            "source": conversation.source.value,
+            "language": conversation.language,
+            "status": conversation.status.value,
+            "structured": {
+                "title": conversation.structured.title,
+                "overview": conversation.structured.overview,
+                "category": conversation.structured.category,
+                "action_items": conversation.structured.action_items,
+                "events": conversation.structured.events,
+                "memories": conversation.structured.memories
+            },
+            "transcript_segments": [
+                {
+                    "text": seg.text,
+                    "speaker": seg.speaker,
+                    "timestamp": seg.timestamp,
+                    "confidence": seg.confidence,
+                    "is_final": seg.is_final
+                }
+                for seg in conversation.transcript_segments
+            ],
+            "user_id": conversation.user_id,
+            "device_id": conversation.device_id,
+            "duration": conversation.duration,
+            "geolocation": conversation.geolocation,
+            "photos": conversation.photos,
+            "apps_results": conversation.apps_results,
+            "external_data": conversation.external_data,
+            "visibility": conversation.visibility
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error getting conversation", conversation_id=conversation_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to get conversation"}
+        )
+
+@app.post("/v1/conversations/search")
+@limiter.limit("5/minute")
+async def search_conversations(
+    request: Request,
+    search_data: dict,
+    api_key = Depends(get_current_api_key)
+):
+    """Search conversations by content."""
+    try:
+        user_id = search_data.get("user_id")
+        query = search_data.get("query", "")
+        limit = search_data.get("limit", 10)
+        
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "user_id is required"}
+            )
+        
+        if not query.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"error": "query is required"}
+            )
+        
+        conversation_storage = get_conversation_storage()
+        
+        # Search conversations
+        conversations = conversation_storage.search_conversations(
+            user_id=user_id,
+            query=query,
+            limit=limit
+        )
+        
+        # Convert to response format
+        conversation_list = []
+        for conv in conversations:
+            conversation_list.append({
+                "id": conv.id,
+                "created_at": conv.created_at.isoformat(),
+                "title": conv.structured.title,
+                "overview": conv.structured.overview,
+                "status": conv.status.value,
+                "relevance_score": 0.8  # In production, calculate actual relevance
+            })
+        
+        return {
+            "conversations": conversation_list,
+            "count": len(conversation_list),
+            "query": query,
+            "user_id": user_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error searching conversations", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "Failed to search conversations"}
+        )
+
+# WebSocket endpoint for real-time Omi device integration
+@app.websocket("/v4/listen")
+async def websocket_endpoint(
+    websocket: WebSocket, 
+    uid: str = Query(..., description="User ID from Firebase"),
+    language: str = Query(default="en", description="Language code"),
+    device_type: str = Query(default="omi", description="Device type")
+):
+    """Real-time WebSocket endpoint for Omi device audio streaming.
+    
+    Follows Omi documentation for /v4/listen endpoint.
+    Supports bidirectional audio streaming and real-time transcription.
+    """
+    import json
+    from websocket_handlers import WebSocketConnection
+    from conversation_storage import ConversationSource, TranscriptSegment, ConversationStatus
+    
+    websocket_manager = get_websocket_manager()
+    conversation_storage = get_conversation_storage()
+    
+    # Validate language and get STT service
+    try:
+        stt_service = get_stt_service_for_language(language)
+        logger.info("STT service selected", language=language, service=stt_service.value)
+    except Exception as e:
+        logger.error("Invalid language parameter", language=language, error=str(e))
+        await websocket.close(code=4003, reason="Invalid language")
+        return
+    
+    # Establish connection
+    try:
+        connection = await websocket_manager.connect(websocket, uid, language)
+    except ValueError as e:
+        logger.error("WebSocket connection failed", error=str(e))
+        return
+    
+    # Create conversation for this session
+    conversation = conversation_storage.create_conversation(uid, ConversationSource.OMI)
+    
+    try:
+        # Main WebSocket message loop
+        while connection.is_connected:
+            try:
+                # Receive message from client
+                message = await websocket.receive_text()
+                data = json.loads(message)
+                
+                message_type = data.get("type")
+                
+                if message_type == "audio_data":
+                    # Handle audio streaming
+                    audio_data = data.get("data", "")
+                    if audio_data:
+                        # Convert base64 to bytes if needed
+                        import base64
+                        if isinstance(audio_data, str):
+                            audio_bytes = base64.b64decode(audio_data)
+                        else:
+                            audio_bytes = audio_data
+                        
+                        await websocket_manager.handle_audio_stream(connection, audio_bytes)
+                
+                elif message_type == "transcript_chunk":
+                    # Handle transcript segment
+                    segment_data = data.get("data", {})
+                    segment = TranscriptSegment(
+                        text=segment_data.get("text", ""),
+                        speaker=segment_data.get("speaker"),
+                        timestamp=segment_data.get("timestamp", 0),
+                        confidence=segment_data.get("confidence", 0),
+                        is_final=segment_data.get("is_final", True)
+                    )
+                    
+                    conversation_storage.add_transcript_segment(conversation.id, segment)
+                    connection.transcript_buffer.append(segment.text)
+                    
+                    # Send acknowledgment
+                    await connection.send_status("transcript_received")
+                
+                elif message_type == "conversation_end":
+                    # End conversation and process
+                    conversation_storage.finish_conversation(conversation.id)
+                    
+                    # Process with AI
+                    full_transcript = " ".join(connection.transcript_buffer)
+                    if full_transcript.strip():
+                        ai_result = extract_tasks_and_summary(full_transcript)
+                        
+                        # Convert to structured format
+                        structured_data = extract_structured_data_from_ai_result(ai_result)
+                        conversation_storage.process_conversation(conversation.id, structured_data)
+                        
+                        # Send final results
+                        await connection.websocket.send_text(json.dumps({
+                            "type": "conversation_complete",
+                            "data": {
+                                "conversation_id": conversation.id,
+                                "structured": {
+                                    "title": structured_data.title,
+                                    "overview": structured_data.overview,
+                                    "action_items": structured_data.action_items,
+                                    "events": structured_data.events,
+                                    "memories": structured_data.memories
+                                },
+                                "tasks": ai_result.get("tasks", []),
+                                "summary": ai_result.get("summary", "")
+                            }
+                        }))
+                    
+                    await connection.send_status("conversation_processed")
+                
+                elif message_type == "ping":
+                    # Health check
+                    await connection.websocket.send_text(json.dumps({
+                        "type": "pong",
+                        "data": {"timestamp": asyncio.get_event_loop().time()}
+                    }))
+                
+                else:
+                    logger.warning("Unknown message type", message_type=message_type)
+                    await connection.send_error(f"Unknown message type: {message_type}")
+                    
+            except WebSocketDisconnect:
+                logger.info("WebSocket disconnected by client", connection_id=connection.connection_id)
+                break
+            except json.JSONDecodeError:
+                await connection.send_error("Invalid JSON format")
+            except Exception as e:
+                logger.error("Error processing WebSocket message", error=str(e))
+                await connection.send_error(f"Processing error: {str(e)}")
+                
+    except WebSocketDisconnect:
+        logger.info("WebSocket connection closed", connection_id=connection.connection_id)
+    except Exception as e:
+        logger.error("WebSocket error", error=str(e))
+    finally:
+        # Cleanup
+        websocket_manager.disconnect(connection.connection_id)
+        if conversation.status == ConversationStatus.IN_PROGRESS:
+            conversation_storage.finish_conversation(conversation.id)
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
